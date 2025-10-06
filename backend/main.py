@@ -75,6 +75,7 @@ class FinalResultResponse(BaseModel):
     passed_quiz: bool
     selected: Optional[bool]
     feedback: Optional[str]
+    video_score: Optional[int] = None
 
 
 class SubmitVideoURLRequest(BaseModel):
@@ -423,10 +424,8 @@ def _extract_youtube_id(url: str) -> Optional[str]:
 async def generate_quiz(payload: GenerateQuizRequest, background_tasks: BackgroundTasks):
     quiz_id = f"quiz_{int(datetime.utcnow().timestamp()*1000)}"
 
-    # Prefer Gemini → then OpenAI → fallback templates for variety
+    # Enforce role: Gemini only for quiz generation; fallback to local templates if missing
     questions = _generate_questions_with_gemini(payload.topic, payload.num_questions)
-    if not questions:
-        questions = _generate_questions_with_openai(payload.topic, payload.num_questions)
     if not questions:
         questions = _fallback_generate_questions(payload.topic, payload.num_questions)
 
@@ -616,38 +615,55 @@ async def submit_video(
     if not transcript:
         transcript = "Candidate presented a solid understanding of basics and project overview."
 
-    # Generate feedback and a simple selection heuristic using LLM if available
+    # OpenAI-only analysis: produce feedback + numeric score 0-100
     feedback = "Strong fundamentals; consider deeper examples of real-world integrations."
+    video_score: int = 60
     try:
-        summary_prompt = (
-            "You are an admissions reviewer. Read the transcript and produce 1-2 sentences of constructive feedback.\n" 
-            "Transcript:\n" + transcript
-        )
         if os.getenv("OPENAI_API_KEY") and OpenAI is not None:
             client = OpenAI()
+            analysis_prompt = (
+                "You are an admissions reviewer. Read the transcript and return STRICT JSON with this schema:\n"
+                "{\n  \"score\": number (0-100 integer),\n  \"feedback\": string (1-2 sentences)\n}\n\n"
+                "Evaluate clarity, technical depth, relevance to topic, and communication.\n"
+                "Transcript:\n" + transcript
+            )
             resp = client.chat.completions.create(
                 model=os.getenv("OPENAI_FEEDBACK_MODEL", "gpt-4o-mini"),
-                messages=[{"role": "user", "content": summary_prompt}],
-                temperature=0.4,
+                messages=[{"role": "user", "content": analysis_prompt}],
+                temperature=0.2,
             )
-            feedback = resp.choices[0].message.content or feedback
-        elif os.getenv("GEMINI_API_KEY") and genai is not None:
-            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-            model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
-            r = model.generate_content(summary_prompt)
-            feedback = r.text or feedback
+            content = resp.choices[0].message.content or ""
+            try:
+                obj = json.loads(content)
+                s = int(obj.get("score", video_score))
+                if s < 0:
+                    s = 0
+                if s > 100:
+                    s = 100
+                video_score = s
+                feedback = str(obj.get("feedback") or feedback)
+            except Exception:
+                # fallback: try to extract first integer in content
+                import re
+
+                m = re.search(r"(\d{1,3})", content)
+                if m:
+                    video_score = max(0, min(100, int(m.group(1))))
+                if content.strip():
+                    feedback = content.strip()
     except Exception:
         pass
 
-    # Basic selection: must have passed quiz; if transcript length is decent -> select
+    # Selection: must have passed quiz and achieve score >= 70
     passed_quiz = SUBMISSIONS.get(quiz_id, {}).get("passed", False)
-    selected = bool(passed_quiz and len(transcript.split()) >= 20)
+    selected = bool(passed_quiz and video_score >= 70)
 
     VIDEO_ANALYSIS[quiz_id] = {
         "path": dest_path,
         "transcript": transcript,
         "feedback": feedback,
         "selected": selected,
+        "video_score": video_score,
     }
 
     return {
@@ -655,6 +671,7 @@ async def submit_video(
         "status": "processing_complete",
         "transcript_preview": transcript[:120],
         "selected": selected,
+        "video_score": video_score,
     }
 
 
@@ -687,37 +704,52 @@ async def submit_video_url(payload: SubmitVideoURLRequest):
     if not transcript_text:
         transcript_text = "Transcript unavailable; evaluate based on overall content quality heuristics."
 
-    # LLM feedback
+    # OpenAI-only feedback + score
     feedback = "Strong fundamentals; consider deeper examples of real-world integrations."
+    video_score: int = 60
     try:
-        summary_prompt = (
-            "You are an admissions reviewer. Read the transcript and produce 1-2 sentences of constructive feedback.\n"
-            "Transcript:\n" + transcript_text
-        )
         if os.getenv("OPENAI_API_KEY") and OpenAI is not None:
             client = OpenAI()
+            analysis_prompt = (
+                "You are an admissions reviewer. Read the transcript and return STRICT JSON with this schema:\n"
+                "{\n  \"score\": number (0-100 integer),\n  \"feedback\": string (1-2 sentences)\n}\n\n"
+                "Evaluate clarity, technical depth, relevance to topic, and communication.\n"
+                "Transcript:\n" + transcript_text
+            )
             resp = client.chat.completions.create(
                 model=os.getenv("OPENAI_FEEDBACK_MODEL", "gpt-4o-mini"),
-                messages=[{"role": "user", "content": summary_prompt}],
-                temperature=0.4,
+                messages=[{"role": "user", "content": analysis_prompt}],
+                temperature=0.2,
             )
-            feedback = resp.choices[0].message.content or feedback
-        elif os.getenv("GEMINI_API_KEY") and genai is not None:
-            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-            model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
-            r = model.generate_content(summary_prompt)
-            feedback = r.text or feedback
+            content = resp.choices[0].message.content or ""
+            try:
+                obj = json.loads(content)
+                s = int(obj.get("score", video_score))
+                if s < 0:
+                    s = 0
+                if s > 100:
+                    s = 100
+                video_score = s
+                feedback = str(obj.get("feedback") or feedback)
+            except Exception:
+                import re
+                m = re.search(r"(\d{1,3})", content)
+                if m:
+                    video_score = max(0, min(100, int(m.group(1))))
+                if content.strip():
+                    feedback = content.strip()
     except Exception:
         pass
 
     passed_quiz = SUBMISSIONS.get(payload.quiz_id, {}).get("passed", False)
-    selected = bool(passed_quiz and len(transcript_text.split()) >= 20)
+    selected = bool(passed_quiz and video_score >= 70)
 
     VIDEO_ANALYSIS[payload.quiz_id] = {
         "path": f"youtube:{video_id}",
         "transcript": transcript_text,
         "feedback": feedback,
         "selected": selected,
+        "video_score": video_score,
     }
 
     return {
@@ -725,6 +757,7 @@ async def submit_video_url(payload: SubmitVideoURLRequest):
         "status": "processing_complete",
         "transcript_preview": transcript_text[:120],
         "selected": selected,
+        "video_score": video_score,
     }
 
 
@@ -737,6 +770,7 @@ async def final_result(quiz_id: str):
         passed_quiz=bool(passed_quiz),
         selected=analysis.get("selected") if analysis else None,
         feedback=analysis.get("feedback") if analysis else None,
+        video_score=analysis.get("video_score") if analysis else None,
     )
 
 
