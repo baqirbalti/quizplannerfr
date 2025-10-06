@@ -7,6 +7,7 @@ export default function VideoPage() {
   const { quizId } = useParams<{ quizId: string }>();
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -22,6 +23,24 @@ export default function VideoPage() {
         body: fd,
       });
       if (!res.ok) throw new Error("Upload failed");
+      router.push(`/final/${quizId}`);
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitYouTube = async () => {
+    if (!youtubeUrl) return;
+    try {
+      setLoading(true);
+      const res = await fetch(`${API_BASE}/submit_video_url`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quiz_id: String(quizId), youtube_url: youtubeUrl }),
+      });
+      if (!res.ok) throw new Error("YouTube analysis failed");
       router.push(`/final/${quizId}`);
     } catch (e) {
       alert((e as Error).message);
@@ -50,6 +69,23 @@ export default function VideoPage() {
         >
           {loading ? "Submitting..." : "Submit Video"}
         </button>
+        <div className="mt-6 border-t border-white/10 pt-6">
+          <label className="block text-sm mb-2">Or paste a YouTube URL</label>
+          <input
+            type="url"
+            placeholder="https://www.youtube.com/watch?v=..."
+            value={youtubeUrl}
+            onChange={(e) => setYoutubeUrl(e.target.value)}
+            className="w-full rounded bg-white/5 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-sky-500"
+          />
+          <button
+            disabled={!youtubeUrl || loading}
+            onClick={submitYouTube}
+            className="mt-3 px-5 py-3 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 font-medium"
+          >
+            {loading ? "Analyzing..." : "Analyze YouTube Video"}
+          </button>
+        </div>
       </div>
     </div>
   );

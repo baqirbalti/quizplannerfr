@@ -11,6 +11,11 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from urllib.parse import urlparse, parse_qs
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
+except Exception:  # pragma: no cover
+    YouTubeTranscriptApi = None
 
 try:
     import google.generativeai as genai  # type: ignore
@@ -70,6 +75,11 @@ class FinalResultResponse(BaseModel):
     passed_quiz: bool
     selected: Optional[bool]
     feedback: Optional[str]
+
+
+class SubmitVideoURLRequest(BaseModel):
+    quiz_id: str
+    youtube_url: str
 
 
 load_dotenv()
@@ -392,6 +402,23 @@ def _generate_questions_with_openai(topic: str, num: int) -> list[dict]:
     return _fallback_generate_questions(topic, num)
 
 
+def _extract_youtube_id(url: str) -> Optional[str]:
+    try:
+        parsed = urlparse(url)
+        if parsed.netloc in {"youtu.be"}:
+            return parsed.path.lstrip("/") or None
+        if "youtube.com" in parsed.netloc:
+            if parsed.path == "/watch":
+                return parse_qs(parsed.query).get("v", [None])[0]
+            # also support /shorts/<id> or /embed/<id>
+            parts = [p for p in parsed.path.split("/") if p]
+            if parts and parts[0] in {"shorts", "embed"} and len(parts) > 1:
+                return parts[1]
+        return None
+    except Exception:
+        return None
+
+
 @app.post("/generate_quiz", response_model=GenerateQuizResponse)
 async def generate_quiz(payload: GenerateQuizRequest, background_tasks: BackgroundTasks):
     quiz_id = f"quiz_{int(datetime.utcnow().timestamp()*1000)}"
@@ -627,6 +654,76 @@ async def submit_video(
         "quiz_id": quiz_id,
         "status": "processing_complete",
         "transcript_preview": transcript[:120],
+        "selected": selected,
+    }
+
+
+@app.post("/submit_video_url")
+async def submit_video_url(payload: SubmitVideoURLRequest):
+    if payload.quiz_id not in QUIZZES:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    if YouTubeTranscriptApi is None:
+        raise HTTPException(status_code=500, detail="YouTube transcript dependency not available")
+
+    video_id = _extract_youtube_id(payload.youtube_url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+
+    # Try transcript in preferred languages
+    transcript_text = ""
+    try:
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
+        transcript_text = " ".join([seg.get("text", "") for seg in transcript_list])
+    except Exception:
+        # Try generated
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            tr = transcript_list.find_transcript(["en"]).fetch()
+            transcript_text = " ".join([seg.get("text", "") for seg in tr])
+        except Exception:
+            transcript_text = ""
+
+    if not transcript_text:
+        transcript_text = "Transcript unavailable; evaluate based on overall content quality heuristics."
+
+    # LLM feedback
+    feedback = "Strong fundamentals; consider deeper examples of real-world integrations."
+    try:
+        summary_prompt = (
+            "You are an admissions reviewer. Read the transcript and produce 1-2 sentences of constructive feedback.\n"
+            "Transcript:\n" + transcript_text
+        )
+        if os.getenv("OPENAI_API_KEY") and OpenAI is not None:
+            client = OpenAI()
+            resp = client.chat.completions.create(
+                model=os.getenv("OPENAI_FEEDBACK_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "user", "content": summary_prompt}],
+                temperature=0.4,
+            )
+            feedback = resp.choices[0].message.content or feedback
+        elif os.getenv("GEMINI_API_KEY") and genai is not None:
+            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+            model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-1.5-flash"))
+            r = model.generate_content(summary_prompt)
+            feedback = r.text or feedback
+    except Exception:
+        pass
+
+    passed_quiz = SUBMISSIONS.get(payload.quiz_id, {}).get("passed", False)
+    selected = bool(passed_quiz and len(transcript_text.split()) >= 20)
+
+    VIDEO_ANALYSIS[payload.quiz_id] = {
+        "path": f"youtube:{video_id}",
+        "transcript": transcript_text,
+        "feedback": feedback,
+        "selected": selected,
+    }
+
+    return {
+        "quiz_id": payload.quiz_id,
+        "status": "processing_complete",
+        "transcript_preview": transcript_text[:120],
         "selected": selected,
     }
 

@@ -9,3 +9,4 @@ aiohttp==3.12.15
 python-multipart==0.0.20
 sqlalchemy==2.0.43
 asyncpg==0.30.0
+youtube-transcript-api==0.6.2
