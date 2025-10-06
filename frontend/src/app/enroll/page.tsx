@@ -9,7 +9,7 @@ import { API_BASE } from "@/app/api/config";
 const schema = z.object({
 	email: z.string().email(),
 	topic: z.string().min(2),
-	num_questions: z.coerce.number().min(1).max(30),
+	num_questions: z.number().min(1).max(30),
 });
 
 type FormData = z.infer<typeof schema>;
