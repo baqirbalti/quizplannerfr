@@ -1,0 +1,22 @@
+﻿# OS
+.DS_Store
+Thumbs.db
+
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/uploads/
+
+# Node / Next
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.vercel/
+frontend/coverage/
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+
+# Env
+*.env
+*.env.*
+
