@@ -277,7 +277,13 @@ def _send_quiz_email_sync(to_email: str, quiz_id: str) -> None:
             QUIZZES[quiz_id]["email_status"] = {"queued": False, "sent": False, "error": "not_configured"}
         return
 
-    quiz_url = _build_quiz_url(quiz_id, payload.topic, payload.num_questions, payload.email)
+    qmeta = QUIZZES.get(quiz_id, {})
+    quiz_url = _build_quiz_url(
+        quiz_id,
+        qmeta.get("topic"),
+        qmeta.get("num_questions"),
+        qmeta.get("email") or to_email,
+    )
     msg = EmailMessage()
     msg["Subject"] = "Your AI Skill Bridge Quiz Link"
     msg["From"] = sender
@@ -489,7 +495,7 @@ async def generate_quiz(payload: GenerateQuizRequest, background_tasks: Backgrou
         quiz_id,
         qmeta.get("topic"),
         qmeta.get("num_questions"),
-        qmeta.get("email") or to_email,
+        (qmeta.get("email") or to_email),
     )
 
     # Queue email only if SMTP config is present
