@@ -1,12 +1,15 @@
 import os
 import json
+import hmac
+import base64
+import hashlib
 import random
 import smtplib
 from email.message import EmailMessage
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request, Query
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -89,6 +92,8 @@ app = FastAPI(title="AI Skill Bridge Backend", version="0.2.0")
 
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 frontend_base_url = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
+secret_key = os.getenv("SECRET_KEY", "dev-secret-change-me")
+token_ttl_seconds = int(os.getenv("QUIZ_TOKEN_TTL_SECONDS", "259200"))  # default 3 days
 
 # For local development, allow all origins to avoid CORS/preflight issues
 app.add_middleware(
@@ -208,8 +213,50 @@ def _fallback_generate_questions(topic: str, num: int) -> list[dict]:
     return questions
 
 
-def _build_quiz_url(quiz_id: str) -> str:
-    return f"{frontend_base_url.rstrip('/')}/quiz/{quiz_id}"
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
+
+
+def _b64url_decode(s: str) -> bytes:
+    pad = '=' * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def _sign_token(payload: dict) -> str:
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    sig = hmac.new(secret_key.encode("utf-8"), body, hashlib.sha256).digest()
+    return f"{_b64url_encode(body)}.{_b64url_encode(sig)}"
+
+
+def _verify_token(token: str) -> Optional[dict]:
+    try:
+        body_b64, sig_b64 = token.split(".", 1)
+        body = _b64url_decode(body_b64)
+        sig = _b64url_decode(sig_b64)
+        expected = hmac.new(secret_key.encode("utf-8"), body, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        obj = json.loads(body.decode("utf-8"))
+        # expiry check
+        exp = obj.get("exp")
+        if isinstance(exp, int) and exp < int(datetime.utcnow().timestamp()):
+            return None
+        return obj
+    except Exception:
+        return None
+
+
+def _build_quiz_url(quiz_id: str, topic: Optional[str] = None, num_questions: Optional[int] = None, email: Optional[str] = None) -> str:
+    """Include a signed token so quiz can be reconstructed after restarts."""
+    payload = {
+        "quiz_id": quiz_id,
+        "topic": topic or "General AI",
+        "num_questions": int(num_questions or 10),
+        "email": email or "",
+        "exp": int((datetime.utcnow() + timedelta(seconds=token_ttl_seconds)).timestamp()),
+    }
+    token = _sign_token(payload)
+    return f"{frontend_base_url.rstrip('/')}/quiz/{quiz_id}?t={token}"
 
 
 def _send_quiz_email_sync(to_email: str, quiz_id: str) -> None:
@@ -230,7 +277,7 @@ def _send_quiz_email_sync(to_email: str, quiz_id: str) -> None:
             QUIZZES[quiz_id]["email_status"] = {"queued": False, "sent": False, "error": "not_configured"}
         return
 
-    quiz_url = _build_quiz_url(quiz_id)
+    quiz_url = _build_quiz_url(quiz_id, payload.topic, payload.num_questions, payload.email)
     msg = EmailMessage()
     msg["Subject"] = "Your AI Skill Bridge Quiz Link"
     msg["From"] = sender
@@ -275,7 +322,7 @@ def _send_quiz_email_status(to_email: str, quiz_id: str) -> dict:
         print("[email] SMTP not configured; skipping send")
         return {"queued": False, "sent": False, "error": "not_configured"}
 
-    quiz_url = _build_quiz_url(quiz_id)
+    quiz_url = _build_quiz_url(quiz_id, QUIZZES.get(quiz_id, {}).get("topic"), QUIZZES.get(quiz_id, {}).get("num_questions"), QUIZZES.get(quiz_id, {}).get("email"))
     msg = EmailMessage()
     msg["Subject"] = "Your AI Skill Bridge Quiz Link"
     msg["From"] = sender
@@ -437,7 +484,13 @@ async def generate_quiz(payload: GenerateQuizRequest, background_tasks: Backgrou
     }
     QUESTIONS[quiz_id] = questions
 
-    quiz_url = _build_quiz_url(quiz_id)
+    qmeta = QUIZZES.get(quiz_id, {})
+    quiz_url = _build_quiz_url(
+        quiz_id,
+        qmeta.get("topic"),
+        qmeta.get("num_questions"),
+        qmeta.get("email") or to_email,
+    )
 
     # Queue email only if SMTP config is present
     smtp_configured = bool(os.getenv("SMTP_HOST") and os.getenv("SMTP_USER") and os.getenv("SMTP_PASS"))
@@ -493,12 +546,35 @@ async def resend_quiz_email_get(quiz_id: str, email: str):
 
 
 @app.get("/quiz/{quiz_id}", response_model=GenerateQuizResponse)
-async def get_quiz(quiz_id: str):
+async def get_quiz(quiz_id: str, request: Request, t: Optional[str] = Query(default=None)):
     if quiz_id not in QUIZZES or quiz_id not in QUESTIONS:
-        raise HTTPException(status_code=404, detail="Quiz not found")
+        # Attempt recovery using signed token from query or Referer
+        token = t
+        if not token:
+            ref = request.headers.get("referer") or request.headers.get("referrer")
+            if ref and "?t=" in ref:
+                try:
+                    token = ref.split("?t=", 1)[1].split("&", 1)[0]
+                except Exception:
+                    token = None
+        data = _verify_token(token) if token else None
+        if data and data.get("quiz_id") == quiz_id:
+            topic = str(data.get("topic") or "General AI")
+            num = int(data.get("num_questions") or 10)
+            # Re-create quiz in memory
+            QUIZZES[quiz_id] = {
+                "email": str(data.get("email") or ""),
+                "topic": topic,
+                "num_questions": num,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            QUESTIONS[quiz_id] = _generate_questions_with_gemini(topic, num) or _fallback_generate_questions(topic, num)
+        else:
+            raise HTTPException(status_code=404, detail="Quiz not found")
     questions = QUESTIONS[quiz_id]
     # Build quiz_url and indicate if email queueing is configured (for info only)
-    quiz_url = _build_quiz_url(quiz_id)
+    qmeta = QUIZZES.get(quiz_id, {})
+    quiz_url = _build_quiz_url(quiz_id, qmeta.get("topic"), qmeta.get("num_questions"), qmeta.get("email"))
     smtp_configured = bool(os.getenv("SMTP_HOST") and os.getenv("SMTP_USER") and os.getenv("SMTP_PASS"))
     return GenerateQuizResponse(
         quiz_id=quiz_id,
