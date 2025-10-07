@@ -437,7 +437,7 @@ Candidates receive a personalized quiz link via email:
 ### 2. Landing Page
 Modern, responsive homepage with clear call-to-action:
 
-![Homepage](docs/homepage.png)
+![Homepage]("C:\Users\baqir\OneDrive\Pictures\Screenshots\Screenshot 2025-10-07 181231.png")
 
 *Dark-themed UI with hero section, features, and testimonials*
 
