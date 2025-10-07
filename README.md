@@ -247,7 +247,6 @@ Generate a new quiz and send email with link.
   "num_questions": 10
 }
 ```
-
 **Response**:
 ```json
 {
@@ -428,7 +427,7 @@ quizplanner_02/
 ### 1. Email Notification
 Candidates receive a personalized quiz link via email:
 
-![Email with Quiz Link](docs/email-notification.png)
+![Email with Quiz Link](https://github.com/baqirbalti/quizplannerfr/blob/main/Screenshot%202025-10-07%20180634.png?raw=true)
 
 *Automated email delivery with secure, token-based quiz links*
 
@@ -437,7 +436,7 @@ Candidates receive a personalized quiz link via email:
 ### 2. Landing Page
 Modern, responsive homepage with clear call-to-action:
 
-![Homepage](C:\Users\baqir\OneDrive\Pictures\Screenshots\Screenshot 2025-10-07 181231.png)
+![Homepage](https://github.com/baqirbalti/quizplannerfr/blob/main/Screenshot%202025-10-07%20181231.png?raw=true)
 
 *Dark-themed UI with hero section, features, and testimonials*
 
@@ -446,7 +445,7 @@ Modern, responsive homepage with clear call-to-action:
 ### 3. Quiz Enrollment
 Simple form to generate personalized quizzes:
 
-![Enrollment Form](docs/enrollment-form.png)
+![Enrollment Form](https://github.com/baqirbalti/quizplannerfr/blob/main/Screenshot%202025-10-08%20004408.png?raw=true)
 
 *Users enter email, select topic, and choose number of questions*
 
@@ -456,10 +455,10 @@ Simple form to generate personalized quizzes:
 Production-ready infrastructure:
 
 **Frontend (Vercel)**:
-![Vercel Deployment](docs/vercel-deployment.png)
+![Vercel Deployment](https://github.com/baqirbalti/quizplannerfr/blob/main/Screenshot%202025-10-07%20181127.png?raw=true)
 
 **Backend (Railway)**:
-![Railway Deployment](docs/railway-deployment.png)
+![Railway Deployment](https://github.com/baqirbalti/quizplannerfr/blob/main/Screenshot%202025-10-07%20181155.png?raw=true)
 
 ---
 
